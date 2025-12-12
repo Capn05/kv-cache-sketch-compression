@@ -46,7 +46,9 @@ results/
 *.pt
 *.pth
 *.ckpt
-models/
+# Don't ignore src/models/ (our source code!)
+# Only ignore root-level model downloads
+/models/
 cache/
 .cache/
 
@@ -64,4 +66,5 @@ Thumbs.db
 *.tmp
 tmp/
 temp/
+
 
