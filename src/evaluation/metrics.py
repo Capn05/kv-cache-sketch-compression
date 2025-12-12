@@ -187,6 +187,62 @@ class QualityMetrics:
         perplexity = math.exp(avg_nll)
         
         return perplexity
+
+    @staticmethod
+    def compute_perplexity_autoregressive(
+        model,
+        tokenizer,
+        texts: List[str],
+        device: str = "cuda",
+        max_length: int = 1024,
+    ) -> float:
+        """
+        Compute perplexity using an autoregressive, cached token-by-token loop.
+
+        This is important for KV-cache compression experiments, because eviction
+        and cache capping affect the *next-step* computation via `past_key_values`.
+
+        Notes:
+        - Uses teacher forcing (scores the next token from the true sequence).
+        - Batch size is processed as 1 for simplicity and robustness.
+        """
+        model.eval()
+        total_nll = 0.0
+        total_tokens = 0
+
+        with torch.no_grad():
+            for text in texts:
+                enc = tokenizer(
+                    text,
+                    return_tensors="pt",
+                    max_length=max_length,
+                    truncation=True,
+                )
+                input_ids = enc["input_ids"].to(device)  # (1, T)
+                if input_ids.shape[1] < 2:
+                    continue
+
+                past_key_values = None
+                # predict token t from context up to t-1
+                for t in range(input_ids.shape[1] - 1):
+                    curr = input_ids[:, t : t + 1]
+                    target = input_ids[:, t + 1]
+
+                    if past_key_values is None:
+                        outputs = model(curr, use_cache=True)
+                    else:
+                        outputs = model(curr, past_key_values=past_key_values, use_cache=True)
+
+                    past_key_values = outputs.past_key_values
+                    logits = outputs.logits[:, -1, :]  # (1, vocab)
+
+                    log_probs = torch.log_softmax(logits, dim=-1)  # (1, vocab)
+                    nll = -log_probs.gather(1, target.view(-1, 1)).squeeze(1)  # (1,)
+                    total_nll += float(nll.item())
+                    total_tokens += 1
+
+        avg_nll = total_nll / total_tokens if total_tokens > 0 else float("inf")
+        return math.exp(avg_nll)
     
     @staticmethod
     def compute_bleu(

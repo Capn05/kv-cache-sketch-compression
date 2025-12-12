@@ -2,7 +2,7 @@
 Sketch-based KV-cache compression experiments.
 
 This script evaluates Count-Min Sketch compression across different
-configurations and strategies.
+configurations and strategies, and supports multiple sketch types.
 """
 
 import sys
@@ -10,6 +10,7 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 import torch
+import torch.nn.functional as F
 from transformers import GPT2Tokenizer
 from datasets import load_dataset
 from tqdm import tqdm
@@ -19,6 +20,37 @@ import itertools
 
 from src.models.sketch_gpt2 import SketchGPT2LMHeadModel
 from src.evaluation.metrics import MemoryTracker, LatencyTracker, QualityMetrics, ExperimentLogger
+
+
+def _entropy_from_logits(logits: torch.Tensor) -> float:
+    """
+    Args:
+        logits: (vocab,) or (1, vocab)
+    """
+    if logits.ndim == 2:
+        logits = logits[0]
+    logp = F.log_softmax(logits, dim=-1)
+    p = torch.exp(logp)
+    return float(-(p * logp).sum().item())
+
+
+def _repetition_rate_token_window(token_ids: torch.Tensor, window: int = 128) -> float:
+    """
+    Simple repetition heuristic: fraction of tokens in the last `window` that
+    have occurred before within that window.
+    """
+    ids = token_ids.view(-1).tolist()
+    if not ids:
+        return 0.0
+    tail = ids[-int(window) :] if len(ids) > window else ids
+    seen = set()
+    repeats = 0
+    for t in tail:
+        if t in seen:
+            repeats += 1
+        else:
+            seen.add(t)
+    return float(repeats / max(1, len(tail)))
 
 
 def run_sketch_generation(
@@ -68,6 +100,81 @@ def run_sketch_generation(
     return generated_text
 
 
+def run_sketch_generation_manual(
+    model,
+    tokenizer,
+    prompt: str,
+    max_new_tokens: int,
+    device: str,
+    memory_tracker: MemoryTracker,
+    latency_tracker: LatencyTracker,
+    adaptive: bool = False,
+):
+    """
+    Manual token-by-token generation loop (so we can drive adaptive control).
+    """
+    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+    attention_mask = torch.ones_like(input_ids)
+
+    memory_tracker.reset()
+    memory_tracker.record("start")
+
+    model.eval()
+    generated_ids = input_ids.clone()
+    past_key_values = None
+    adaptive_log = []
+
+    with torch.no_grad():
+        for step in range(int(max_new_tokens)):
+            t0 = time.time()
+            if past_key_values is None:
+                outputs = model(
+                    generated_ids,
+                    attention_mask=torch.ones_like(generated_ids),
+                    use_cache=True,
+                )
+            else:
+                outputs = model(
+                    generated_ids[:, -1:],
+                    attention_mask=torch.ones_like(generated_ids[:, -1:]),
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                )
+
+            past_key_values = outputs.past_key_values
+            next_logits = outputs.logits[:, -1, :]
+
+            entropy = _entropy_from_logits(next_logits)
+            repetition = _repetition_rate_token_window(generated_ids, window=128)
+            if adaptive:
+                new_size = model.adaptive_maybe_update(
+                    step_idx=step, entropy=entropy, repetition=repetition
+                )
+            else:
+                new_size = None
+            adaptive_log.append(
+                {
+                    "step": int(step),
+                    "entropy": float(entropy),
+                    "repetition": float(repetition),
+                    "new_max_cache_size": int(new_size) if new_size is not None else None,
+                }
+            )
+
+            next_token = torch.argmax(next_logits, dim=-1, keepdim=True)
+            generated_ids = torch.cat([generated_ids, next_token], dim=-1)
+
+            elapsed = time.time() - t0
+            latency_tracker.record_token_time(elapsed)
+
+            if next_token.item() == tokenizer.eos_token_id:
+                break
+
+    memory_tracker.record("end")
+    generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+    return generated_text, adaptive_log
+
+
 def run_sketch_generation_to_total_length(
     model,
     tokenizer,
@@ -94,6 +201,31 @@ def run_sketch_generation_to_total_length(
     )
 
 
+def run_sketch_generation_to_total_length_manual(
+    model,
+    tokenizer,
+    prompt: str,
+    total_length: int,
+    device: str,
+    memory_tracker: MemoryTracker,
+    latency_tracker: LatencyTracker,
+    adaptive: bool = False,
+):
+    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+    prompt_len = input_ids.shape[1]
+    max_new_tokens = max(0, int(total_length) - int(prompt_len))
+    return run_sketch_generation_manual(
+        model=model,
+        tokenizer=tokenizer,
+        prompt=prompt,
+        max_new_tokens=max_new_tokens,
+        device=device,
+        memory_tracker=memory_tracker,
+        latency_tracker=latency_tracker,
+        adaptive=adaptive,
+    )
+
+
 def evaluate_sketch_config(
     model_name: str,
     sketch_config: dict,
@@ -102,7 +234,10 @@ def evaluate_sketch_config(
     num_samples: int,
     max_new_tokens: int = 128,
     total_length: int = None,
-    reference_texts: list = None
+    reference_texts: list = None,
+    compute_ppl: bool = False,
+    ppl_num_texts: int = 1,
+    ppl_max_length: int = 256,
 ):
     """
     Evaluate a specific sketch configuration.
@@ -132,11 +267,21 @@ def evaluate_sketch_config(
         model = model.to(device)
     
     # Enable sketch cache with compression
-    # Add max_cache_size if not present (for backward compatibility)
+    # Defaults for backward compatibility / missing fields
+    if "sketch_type" not in sketch_config:
+        sketch_config["sketch_type"] = "cms"
     if 'max_cache_size' not in sketch_config:
         sketch_config['max_cache_size'] = 128  # Default: compress to 128 tokens
+    if "race_bins" not in sketch_config:
+        sketch_config["race_bins"] = 512
+    if "race_num_projections" not in sketch_config:
+        sketch_config["race_num_projections"] = 16
+    if "race_seed" not in sketch_config:
+        sketch_config["race_seed"] = 42
     
     model.enable_sketch_cache(**sketch_config)
+    if sketch_config.get("adaptive", False):
+        model.enable_adaptive_cache()
     
     # Results storage
     results = {
@@ -145,7 +290,8 @@ def evaluate_sketch_config(
         'latency_s': [],
         'tokens_per_sec': [],
         'generated_texts': [],
-        'bleu_scores': []
+        'bleu_scores': [],
+        'adaptive_log': [],
     }
     
     # Run samples
@@ -159,30 +305,56 @@ def evaluate_sketch_config(
         try:
             # Generate
             if total_length is not None:
-                generated_text = run_sketch_generation_to_total_length(
-                    model=model,
-                    tokenizer=tokenizer,
-                    prompt=prompt,
-                    total_length=total_length,
-                    device=device,
-                    memory_tracker=memory_tracker,
-                    latency_tracker=latency_tracker,
-                )
+                if sketch_config.get("adaptive", False):
+                    generated_text, adapt_log = run_sketch_generation_to_total_length_manual(
+                        model=model,
+                        tokenizer=tokenizer,
+                        prompt=prompt,
+                        total_length=total_length,
+                        device=device,
+                        memory_tracker=memory_tracker,
+                        latency_tracker=latency_tracker,
+                        adaptive=True,
+                    )
+                    results["adaptive_log"].append(adapt_log)
+                else:
+                    generated_text = run_sketch_generation_to_total_length(
+                        model=model,
+                        tokenizer=tokenizer,
+                        prompt=prompt,
+                        total_length=total_length,
+                        device=device,
+                        memory_tracker=memory_tracker,
+                        latency_tracker=latency_tracker,
+                    )
                 effective_new_tokens = max(
                     0,
                     int(total_length)
                     - int(tokenizer.encode(prompt, return_tensors="pt").shape[1]),
                 )
             else:
-                generated_text = run_sketch_generation(
-                    model=model,
-                    tokenizer=tokenizer,
-                    prompt=prompt,
-                    max_new_tokens=max_new_tokens,
-                    device=device,
-                    memory_tracker=memory_tracker,
-                    latency_tracker=latency_tracker,
-                )
+                if sketch_config.get("adaptive", False):
+                    generated_text, adapt_log = run_sketch_generation_manual(
+                        model=model,
+                        tokenizer=tokenizer,
+                        prompt=prompt,
+                        max_new_tokens=max_new_tokens,
+                        device=device,
+                        memory_tracker=memory_tracker,
+                        latency_tracker=latency_tracker,
+                        adaptive=True,
+                    )
+                    results["adaptive_log"].append(adapt_log)
+                else:
+                    generated_text = run_sketch_generation(
+                        model=model,
+                        tokenizer=tokenizer,
+                        prompt=prompt,
+                        max_new_tokens=max_new_tokens,
+                        device=device,
+                        memory_tracker=memory_tracker,
+                        latency_tracker=latency_tracker,
+                    )
                 effective_new_tokens = int(max_new_tokens)
             
             # Collect metrics
@@ -213,6 +385,21 @@ def evaluate_sketch_config(
     results['cache_memory_mb'] = sketch_mem_info['cache_mb']
     results['total_sketch_cache_mb'] = sketch_mem_info['total_mb']
     results['avg_tokens_per_layer'] = sketch_mem_info['avg_tokens_per_layer']
+
+    # Autoregressive perplexity (optional; computed once per config for speed)
+    if compute_ppl:
+        try:
+            ppl_texts = test_texts[: max(1, int(ppl_num_texts))]
+            results["perplexity_ar"] = QualityMetrics.compute_perplexity_autoregressive(
+                model=model,
+                tokenizer=tokenizer,
+                texts=ppl_texts,
+                device=device,
+                max_length=int(ppl_max_length),
+            )
+        except Exception as e:
+            results["perplexity_ar"] = None
+            results["perplexity_ar_error"] = str(e)
     
     # Cleanup
     del model
@@ -264,23 +451,27 @@ def run_experiment_grid(
     
     def build_configs(grid_name: str):
         if grid_name == "targeted":
-            sketch_widths = [256, 512]
-            sketch_depths = [2, 4]
+            # Targeted (time-boxed): sketch_type × max_cache_size with fixed sketch params
+            sketch_types = ["cms", "count_sketch", "race"]
+            sketch_widths = [512]
+            sketch_depths = [4]
             max_cache_sizes = [64, 128, 256]
             configs = []
-            for width, depth, cache_size in itertools.product(
-                sketch_widths, sketch_depths, max_cache_sizes
+            for sketch_type, width, depth, cache_size in itertools.product(
+                sketch_types, sketch_widths, sketch_depths, max_cache_sizes
             ):
-                configs.append(
-                    {
-                        "sketch_width": width,
-                        "sketch_depth": depth,
-                        "strategy": "topk",  # ignored for eviction-only, kept for compatibility
-                        "topk": 64,
-                        "recent_window": 64,
-                        "max_cache_size": cache_size,
-                    }
-                )
+                cfg = {
+                    "sketch_type": sketch_type,
+                    "sketch_width": width,
+                    "sketch_depth": depth,
+                    "strategy": "topk",  # accepted for compatibility
+                    "topk": 64,
+                    "recent_window": 64,
+                    "max_cache_size": cache_size,
+                }
+                if sketch_type == "race":
+                    cfg.update({"race_bins": 512, "race_num_projections": 16, "race_seed": 42})
+                configs.append(cfg)
             return configs
 
         # Default: original full grid
@@ -353,6 +544,9 @@ def run_experiment_grid(
                         num_samples=num_samples,
                         max_new_tokens=max_new_tokens,
                         total_length=int(total_len),
+                        compute_ppl=(bool(total_lengths) and int(total_len) == int(total_lengths[0])),
+                        ppl_num_texts=1,
+                        ppl_max_length=min(512, int(total_len)),
                     )
                     results["total_length"] = int(total_len)
 
@@ -403,7 +597,8 @@ def run_experiment_grid(
 
                         # Save per-config-per-length results
                         config_filename = (
-                            f"config_w{config['sketch_width']}_d{config['sketch_depth']}_{config['strategy']}"
+                            f"config_{config.get('sketch_type','cms')}_"
+                            f"w{config['sketch_width']}_d{config['sketch_depth']}_{config['strategy']}"
                         )
                         if config["strategy"] == "topk":
                             config_filename += f"_k{config['topk']}"
@@ -458,7 +653,8 @@ def run_experiment_grid(
 
                     # Save individual config results
                     config_filename = (
-                        f"config_w{config['sketch_width']}_d{config['sketch_depth']}_{config['strategy']}"
+                        f"config_{config.get('sketch_type','cms')}_"
+                        f"w{config['sketch_width']}_d{config['sketch_depth']}_{config['strategy']}"
                     )
                     if config["strategy"] == "topk":
                         config_filename += f"_k{config['topk']}"

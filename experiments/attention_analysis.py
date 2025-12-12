@@ -2,7 +2,7 @@
 Attention distribution analysis for sketch-based compression.
 
 This script compares attention distributions between full cache
-and sketch-based approximations.
+and sketch-based eviction/capping during cached token-by-token decoding.
 """
 
 import sys
@@ -19,33 +19,6 @@ from tqdm import tqdm
 
 from src.models.sketch_gpt2 import SketchGPT2LMHeadModel
 from src.evaluation.metrics import QualityMetrics
-
-
-def extract_attention_weights(model, input_ids, layer_idx=0):
-    """
-    Extract attention weights from a specific layer.
-    
-    Args:
-        model: GPT2 model
-        input_ids: Input token IDs
-        layer_idx: Which layer to analyze
-        
-    Returns:
-        Attention weights tensor
-    """
-    model.eval()
-    with torch.no_grad():
-        outputs = model(
-            input_ids,
-            output_attentions=True,
-            use_cache=False
-        )
-    
-    # Get attention weights for specified layer
-    # Shape: (batch, num_heads, seq_len, seq_len)
-    attention_weights = outputs.attentions[layer_idx]
-    
-    return attention_weights
 
 
 def compare_attention_distributions(
@@ -68,6 +41,10 @@ def compare_attention_distributions(
     # Shape: (seq_len,) - attention over all keys for last query
     full_attn = full_attention[0, head_idx, -1, :]
     sketch_attn = sketch_attention[0, head_idx, -1, :]
+
+    # Make metrics robust under fp16 / eager attention (avoid NaNs/negatives).
+    full_attn = torch.nan_to_num(full_attn.float(), nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+    sketch_attn = torch.nan_to_num(sketch_attn.float(), nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
     
     # Ensure same length (pad if needed)
     max_len = max(full_attn.shape[0], sketch_attn.shape[0])
@@ -127,21 +104,41 @@ def analyze_sketch_config(
     tokenizer = GPT2Tokenizer.from_pretrained(model_name)
     tokenizer.pad_token = tokenizer.eos_token
     
-    # Full cache model
-    full_model = GPT2LMHeadModel.from_pretrained(model_name)
+    # Full cache model (force eager attention so attentions are materialized)
+    try:
+        full_model = GPT2LMHeadModel.from_pretrained(model_name, attn_implementation="eager")
+    except TypeError:
+        full_model = GPT2LMHeadModel.from_pretrained(model_name)
     if device == 'cuda' and torch.cuda.is_available():
         full_model = full_model.to(device).half()
     else:
         full_model = full_model.to(device)
     
-    # Sketch model
-    sketch_model = SketchGPT2LMHeadModel.from_pretrained(model_name)
+    # Sketch model (force eager attention so attentions are materialized)
+    try:
+        sketch_model = SketchGPT2LMHeadModel.from_pretrained(model_name, attn_implementation="eager")
+    except TypeError:
+        sketch_model = SketchGPT2LMHeadModel.from_pretrained(model_name)
     if device == 'cuda' and torch.cuda.is_available():
         sketch_model = sketch_model.to(device).half()
     else:
         sketch_model = sketch_model.to(device)
     
-    sketch_model.enable_sketch_cache(**sketch_config)
+    # Filter out analysis-only keys before enabling cache.
+    allowed_cache_keys = {
+        "sketch_type",
+        "sketch_width",
+        "sketch_depth",
+        "strategy",
+        "topk",
+        "recent_window",
+        "max_cache_size",
+        "race_bins",
+        "race_num_projections",
+        "race_seed",
+    }
+    cache_cfg = {k: v for k, v in sketch_config.items() if k in allowed_cache_keys}
+    sketch_model.enable_sketch_cache(**cache_cfg)
     
     # Results storage
     results = {
@@ -153,38 +150,67 @@ def analyze_sketch_config(
         'peak_diffs': []
     }
     
+    # Analysis params
+    layer_idx = int(sketch_config.get("layer_idx", 6))
+    warmup = int(sketch_config.get("warmup_tokens", 128))
+    stride = int(sketch_config.get("stride", 16))
+
     # Analyze samples
     for i in range(min(num_samples, len(test_texts))):
         text = test_texts[i]
         
-        # Tokenize (limit length for memory)
-        input_ids = tokenizer.encode(text, return_tensors='pt', max_length=256, truncation=True)
+        # Tokenize (limit length for speed/memory)
+        max_len = int(sketch_config.get("max_length", 256))
+        input_ids = tokenizer.encode(
+            text, return_tensors="pt", max_length=max_len, truncation=True
+        )
         input_ids = input_ids.to(device)
         
         if input_ids.shape[1] < 10:
             continue
         
         try:
-            # Get attention from full model
-            full_attention = extract_attention_weights(full_model, input_ids, layer_idx=6)
-            
-            # Get attention from sketch model (Note: this is simplified)
-            # In practice, we'd need to modify the model to return sketch-based attention
-            sketch_attention = extract_attention_weights(sketch_model, input_ids, layer_idx=6)
-            
-            # Compare distributions across multiple heads
-            for head_idx in range(min(4, full_attention.shape[1])):
-                metrics = compare_attention_distributions(
-                    full_attention,
-                    sketch_attention,
-                    head_idx=head_idx
-                )
-                
-                results['kl_divergences'].append(metrics['kl_divergence'])
-                results['cosine_similarities'].append(metrics['cosine_similarity'])
-                results['l1_distances'].append(metrics['l1_distance'])
-                results['l2_distances'].append(metrics['l2_distance'])
-                results['peak_diffs'].append(metrics['peak_position_diff'])
+            # Token-by-token cached decoding (teacher forcing) so capping affects future steps.
+            past_full = None
+            past_sketch = None
+
+            # Feed tokens sequentially; compare attentions at selected steps.
+            for t in range(input_ids.shape[1] - 1):
+                curr = input_ids[:, t : t + 1]
+
+                with torch.no_grad():
+                    out_full = full_model(
+                        curr,
+                        past_key_values=past_full,
+                        use_cache=True,
+                        output_attentions=True,
+                    )
+                    past_full = out_full.past_key_values
+
+                    out_sketch = sketch_model(
+                        curr,
+                        past_key_values=past_sketch,
+                        use_cache=True,
+                        output_attentions=True,
+                    )
+                    past_sketch = out_sketch.past_key_values
+
+                if t < warmup or (stride > 0 and (t % stride) != 0):
+                    continue
+
+                full_attn = out_full.attentions[layer_idx]  # (b, h, 1, kv)
+                sketch_attn = out_sketch.attentions[layer_idx]  # (b, h, 1, kv')
+
+                # Compare distributions across a few heads
+                for head_idx in range(min(4, full_attn.shape[1])):
+                    metrics = compare_attention_distributions(
+                        full_attn, sketch_attn, head_idx=head_idx
+                    )
+                    results["kl_divergences"].append(metrics["kl_divergence"])
+                    results["cosine_similarities"].append(metrics["cosine_similarity"])
+                    results["l1_distances"].append(metrics["l1_distance"])
+                    results["l2_distances"].append(metrics["l2_distance"])
+                    results["peak_diffs"].append(metrics["peak_position_diff"])
         
         except Exception as e:
             print(f"Error analyzing sample {i}: {e}")
@@ -234,28 +260,50 @@ def run_attention_analysis(
     texts = texts[:num_samples]
     
     # Define configurations to analyze
+    # Use a small set of configs that actually change cache behavior.
     configs = [
         {
-            'sketch_width': 256,
-            'sketch_depth': 4,
-            'strategy': 'topk',
-            'topk': 64,
-            'recent_window': 64
+            "sketch_type": "cms",
+            "sketch_width": 512,
+            "sketch_depth": 4,
+            "strategy": "topk",
+            "topk": 64,
+            "recent_window": 64,
+            "max_cache_size": 64,
+            "layer_idx": 6,
+            "warmup_tokens": 64,
+            "stride": 16,
+            "max_length": 256,
         },
         {
-            'sketch_width': 512,
-            'sketch_depth': 4,
-            'strategy': 'topk',
-            'topk': 128,
-            'recent_window': 64
+            "sketch_type": "count_sketch",
+            "sketch_width": 512,
+            "sketch_depth": 4,
+            "strategy": "topk",
+            "topk": 64,
+            "recent_window": 64,
+            "max_cache_size": 64,
+            "layer_idx": 6,
+            "warmup_tokens": 64,
+            "stride": 16,
+            "max_length": 256,
         },
         {
-            'sketch_width': 256,
-            'sketch_depth': 4,
-            'strategy': 'aggregate',
-            'topk': 64,
-            'recent_window': 64
-        }
+            "sketch_type": "race",
+            "race_bins": 512,
+            "race_num_projections": 16,
+            "race_seed": 42,
+            "sketch_width": 512,  # unused by race, kept for uniformity
+            "sketch_depth": 4,  # unused by race, kept for uniformity
+            "strategy": "topk",
+            "topk": 64,
+            "recent_window": 64,
+            "max_cache_size": 64,
+            "layer_idx": 6,
+            "warmup_tokens": 64,
+            "stride": 16,
+            "max_length": 256,
+        },
     ]
     
     all_results = []
