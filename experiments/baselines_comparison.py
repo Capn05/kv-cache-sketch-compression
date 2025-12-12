@@ -125,6 +125,7 @@ def evaluate_sliding_window(
     device: str = 'cuda',
     num_samples: int = 10,
     max_new_tokens: int = 128,
+    total_length: int = None,
     output_dir: str = 'results/baselines'
 ):
     """
@@ -179,11 +180,16 @@ def evaluate_sliding_window(
             start_time = time.time()
             
             # Standard generation (simplified - real sliding window needs attention modification)
+            if total_length is not None:
+                prompt_len = input_ids.shape[1]
+                max_new_tokens = max(0, int(total_length) - int(prompt_len))
+            attention_mask = torch.ones_like(input_ids)
             outputs = model.generate(
                 input_ids,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
                 pad_token_id=tokenizer.eos_token_id,
+                attention_mask=attention_mask,
                 use_cache=True
             )
             
@@ -220,6 +226,7 @@ def evaluate_quantization(
     device: str = 'cuda',
     num_samples: int = 10,
     max_new_tokens: int = 128,
+    total_length: int = None,
     output_dir: str = 'results/baselines'
 ):
     """
@@ -272,11 +279,16 @@ def evaluate_quantization(
             import time
             start_time = time.time()
             
+            if total_length is not None:
+                prompt_len = input_ids.shape[1]
+                max_new_tokens = max(0, int(total_length) - int(prompt_len))
+            attention_mask = torch.ones_like(input_ids)
             outputs = model.generate(
                 input_ids,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
                 pad_token_id=tokenizer.eos_token_id,
+                attention_mask=attention_mask,
                 use_cache=True
             )
             
@@ -312,7 +324,8 @@ def compare_all_baselines(
     model_name: str = 'gpt2',
     device: str = 'cuda',
     num_samples: int = 10,
-    output_dir: str = 'results/baselines'
+    output_dir: str = 'results/baselines',
+    total_lengths: list = None,
 ):
     """Run all baseline comparisons."""
     print("="*60)
@@ -320,27 +333,35 @@ def compare_all_baselines(
     print("="*60)
     
     results = {}
+    if not total_lengths:
+        total_lengths = [None]
     
-    # Sliding window
-    print("\n1. Sliding Window Cache")
-    print("-"*60)
-    results['sliding_window'] = evaluate_sliding_window(
-        model_name=model_name,
-        window_size=256,
-        device=device,
-        num_samples=num_samples,
-        output_dir=output_dir
-    )
-    
-    # Quantization
-    print("\n2. Int8 Quantization")
-    print("-"*60)
-    results['quantization'] = evaluate_quantization(
-        model_name=model_name,
-        device=device,
-        num_samples=num_samples,
-        output_dir=output_dir
-    )
+    for total_len in total_lengths:
+        key_suffix = f"len{int(total_len)}" if total_len is not None else "default"
+        results[key_suffix] = {}
+
+        # Sliding window
+        print("\n1. Sliding Window Cache")
+        print("-"*60)
+        results[key_suffix]['sliding_window'] = evaluate_sliding_window(
+            model_name=model_name,
+            window_size=256,
+            device=device,
+            num_samples=num_samples,
+            total_length=total_len,
+            output_dir=output_dir
+        )
+        
+        # Quantization
+        print("\n2. Int8 Quantization")
+        print("-"*60)
+        results[key_suffix]['quantization'] = evaluate_quantization(
+            model_name=model_name,
+            device=device,
+            num_samples=num_samples,
+            total_length=total_len,
+            output_dir=output_dir
+        )
     
     # Save comparison
     print("\n" + "="*60)
@@ -350,14 +371,17 @@ def compare_all_baselines(
     summary = {
         'model': model_name,
         'num_samples': num_samples,
+        'total_lengths': total_lengths,
         'results': results
     }
     
-    for method, data in results.items():
-        print(f"\n{method.upper()}:")
-        if 'avg_memory_mb' in data:
-            print(f"  Memory: {data['avg_memory_mb']:.2f} MB")
-            print(f"  Latency: {data['avg_latency_s']:.2f} s")
+    for bucket, bucket_results in results.items():
+        print(f"\nTOTAL_LENGTH: {bucket}")
+        for method, data in bucket_results.items():
+            print(f"  {method.upper()}:")
+            if 'avg_memory_mb' in data:
+                print(f"    Memory: {data['avg_memory_mb']:.2f} MB")
+                print(f"    Latency: {data['avg_latency_s']:.2f} s")
     
     with open(os.path.join(output_dir, 'comparison_summary.json'), 'w') as f:
         json.dump(summary, f, indent=2)
@@ -377,6 +401,13 @@ def main():
     parser.add_argument('--num-samples', type=int, default=10, help='Number of samples')
     parser.add_argument('--output-dir', type=str, default='results/baselines',
                        help='Output directory')
+    parser.add_argument(
+        '--total-lengths',
+        type=int,
+        nargs='+',
+        default=None,
+        help='Target total sequence lengths (prompt + generated). If omitted, uses the script defaults.'
+    )
     
     args = parser.parse_args()
     
@@ -384,7 +415,8 @@ def main():
         model_name=args.model,
         device=args.device,
         num_samples=args.num_samples,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        total_lengths=args.total_lengths
     )
 
 

@@ -65,7 +65,8 @@ def test_sketch_gpt2():
             sketch_width=256,
             sketch_depth=4,
             strategy='topk',
-            topk=32
+            topk=32,
+            max_cache_size=32
         )
         print("✓ Sketch cache enabled")
         
@@ -87,7 +88,16 @@ def test_sketch_gpt2():
         
         # Test memory tracking
         mem = model.get_sketch_memory_usage()
-        print(f"✓ Sketch memory: {mem / 1024:.2f} KB")
+        print(
+            "✓ Sketch/cache memory (MB): "
+            f"total={mem['total_mb']:.4f}, "
+            f"sketch={mem['sketch_mb']:.4f}, "
+            f"cache={mem['cache_mb']:.4f}, "
+            f"avg_tokens/layer={mem['avg_tokens_per_layer']:.1f}"
+        )
+        # Smoke assertions: cache should be populated and capped
+        assert mem["avg_tokens_per_layer"] > 0.0, "Cache did not populate during generate()"
+        assert mem["avg_tokens_per_layer"] <= 32.0, "Cache exceeded max_cache_size during generate()"
         
         return True
     except Exception as e:

@@ -1,29 +1,120 @@
-Probabilistic Sketching for KV-Cache Compression in LLMs – Mid-Project Report
-Problem Description
-Transformer-based large language models (LLMs) use a key–value (KV) cache during autoregressive inference to store attention states for all past tokens. This cache grows linearly with sequence length, so long contexts quickly become a major bottleneck for both GPU memory and latency: each new token must read and process an ever-larger cache, which limits batch size, slows throughput, and increases serving costs. Naively discarding old tokens (sliding windows) or recomputing states can either destroy long-range context or add significant overhead, while simply increasing hardware capacity is economically unattractive.
-We propose to replace the full KV cache with probabilistic sketch data structures that maintain compact, approximate summaries of the past. Concretely, we plan to implement three sketch families—Count-Min Sketch, Count-Sketch, and RACE Sketch—to summarize attention keys and/or token embeddings and to support approximate retrieval of representative values without storing every key–value pair. On top of these static sketches, we will design an adaptive sketch controller that adjusts sketch width and number of hash functions in real time based on sequence statistics (e.g., token entropy or redundancy), allocating more capacity to diverse, unpredictable contexts and more compression to repetitive ones.
-Literature Survey
-Prior work on KV-cache efficiency has largely focused on eviction strategies. Sliding-window and streaming-style approaches keep only the most recent tokens, substantially reducing memory but sacrificing long-range dependencies needed for tasks with long prompts or documents. More advanced methods estimate a token’s “importance” based on attention patterns and selectively retain only high-importance tokens, often within a score-and-aggregate framework. These methods can keep 20–50% of cache entries with moderate quality loss, but they rely on assumptions about the stability of token importance over time and can fail when old tokens suddenly become relevant again.
-A second line of work uses quantization and mixed precision to compress the KV cache without removing entries. Techniques that quantize keys and values to 8, 4, or even 2 bits (often with per-channel scaling and outlier handling) achieve large memory savings while maintaining near-baseline accuracy. Mixed-precision schemes further allocate high precision to “important” tokens and low precision to less important ones, driving overall cache size down to a small fraction of the original. These methods show that approximate representations of cached states are viable, but they still store every token and may require complex calibration or fine-tuning.
-System-level optimizations such as paged KV caches and attention kernels like FlashAttention improve I/O efficiency and memory layout by tiling computations and offloading parts of the cache to CPU or disk. They help models handle longer contexts on limited GPU memory but do not fundamentally change the linear growth of cache size with sequence length. In contrast, probabilistic sketches like Count-Min Sketch, Count-Sketch, and RACE were originally developed for streaming frequency estimation and similarity search, offering sublinear memory with probabilistic error guarantees. To our knowledge, these sketches have not yet been applied to KV-cache compression in LLMs, leaving a gap our project aims to explore.
-Hypothesis
-Use case 1 – Static sketch compression: We hypothesize that a fixed-size probabilistic sketch (Count-Min Sketch, Count-Sketch, or RACE) can compress the KV cache to at most 20–30% of its original memory while keeping perplexity and BLEU within ≈1–2% of the full-cache baseline.
-Use case 2 – Adaptive sketch controller: We argue that dynamically adjusting sketch size and hash depth based on token entropy and sequence redundancy will outperform any fixed sketch configuration on the quality–memory trade-off, achieving equal or better generation quality at the same memory budget.
-Experimental Settings
-We will evaluate our methods on open-source LLMs implemented in the Hugging Face Transformers framework, primarily GPT-2 Small (117M) and TinyLlama (~1.1B). These models provide realistic attention mechanisms and KV caching behavior while still being tractable on a single modern GPU. All experiments will be run in autoregressive generation mode with sequence lengths ranging from short prompts (128–256 tokens) up to long contexts (1024–2048 tokens), using mixed-precision inference (FP16 or BF16) to match common deployment settings.
-For static sketch compression (use case 1), we will implement three sketch variants per attention head: Count-Min Sketch, Count-Sketch, and RACE. Each sketch will be instantiated with configurable width (e.g., 64–512 buckets) and depth (e.g., 2–6 hash functions), chosen so that the total sketch memory corresponds to a target fraction (e.g., 10–30%) of the original KV cache footprint. The model’s forward pass will be modified so that when a new token is generated, its key/value are fed into the sketch rather than appended to a full cache, and during attention the query interacts with the sketch to either retrieve a small set of representative keys/values or an aggregated approximate value.
-For adaptive sketching (use case 2), we will add a controller that monitors simple statistics of the recent token stream, such as rolling token entropy, repetition rate (e.g., proportion of n-gram repeats), and possibly changes in model perplexity on the fly. Based on these signals, the controller will resize or reparameterize the sketch—e.g., increasing width/depth when entropy is high (to reduce approximation error in diverse contexts) and shrinking them when the input is highly repetitive (to exploit redundancy and save memory). We will start with rule-based policies (thresholds on entropy and repetition) and, if time permits, explore learned controllers that optimize a reward combining memory usage and quality.
-Our datasets and workloads will include a language modeling benchmark such as WikiText-2 (and possibly WikiText-103) to measure perplexity under long-context evaluation, as well as one or two generation tasks that stress long-range context, such as document summarization or long-form QA. For each dataset, we will run the full-cache model and each compressed variant over the same prompts, recording sequence lengths, outputs, and all relevant metrics. We will also construct synthetic stress tests: one with highly repetitive input (e.g., repeated paragraphs) and one with rapidly changing topics, to explicitly probe how static vs adaptive sketches behave under low- and high-entropy regimes.
-We will compare against several baselines: (1) the uncompressed full KV cache (upper bound on quality, worst case for memory and latency); (2) a sliding-window cache that keeps only the most recent M tokens (strong memory savings but limited context); and (3) a straightforward quantized KV cache (e.g., int8 or int4 keys/values with uniform scaling). For all methods, we will log peak GPU memory usage (from PyTorch CUDA stats), average time per generated token at different sequence lengths, and quality metrics (perplexity on language modeling and BLEU/ROUGE or task-specific scores on generation tasks). Additionally, for a subset of steps we will compare the true attention distribution from the full cache with the approximate distribution induced by the sketches using KL divergence or cosine similarity, relating sketch parameters to attention error and, in turn, to downstream quality.
-Progress and preliminary results
-So far, we have implemented the basic infrastructure for our experiments. We successfully integrated a Count-Min Sketch data structure into a modified GPT-2 model’s inference loop. In a preliminary test on a toy input, the CMS was able to update in real-time with each new token and provide frequency estimates for hashed key identifiers with negligible overhead per token (on the order of microseconds). This confirms that the sketch update/query is fast relative to neural network computations. We have also set up the environment to measure memory usage and latency: in baseline tests with full KV caching, we observed (as expected) linear memory growth and an increase in generation time per token as the sequence grew. For instance, on GPT-2 we verified that doubling the context length roughly doubled the time per step when using the full cache, due to increased attention computation.
-However, as of now, we have not completed the integration of the sketch output into the model’s attention calculations, which means we do not have quality metrics (perplexity, BLEU) to report yet. The main ongoing work is figuring out the best way to use the sketch’s information to approximate the attention mechanism. We are experimenting with two approaches: one where the sketch identifies top-k candidate tokens to attend to (and we then only attend to those), and another where the sketch pwroduces an approximate aggregated value vector that substitutes for the weighted sum of all values. Once this integration is working, we will run the full suite of evaluations described above.
-No definitive experimental plots are ready at this stage. Our plan for the coming weeks is to refine the adaptive controller and then produce plots of memory vs. sequence length, latency vs. sequence length, and quality vs. compression level. We anticipate a plot showing, for example, generation perplexity as a function of memory footprint: we hope to demonstrate that our approach achieves a lower perplexity for a given memory budget compared to baseline strategies (i.e. our curve is closer to the full model’s perplexity at every memory reduction level). Another planned visualization is a time-per-token vs. sequence length comparison, where the full cache line grows linearly and our sketch line grows sub-linearly or remains flatter, indicating better scalability.
-In summary, the project is on track: the problem and approach are clearly defined, related work has been studied to inform our design, and initial implementation of the probabilistic sketches is in progress. The next steps are to complete the attention approximation mechanism, run comprehensive experiments, and iterate on the sketch parameters. We are optimistic that the final results will show that probabilistic sketching is a viable and effective solution for scalable LLM inference, combining ideas from streaming algorithms with modern AI deployment to address the KV-cache bottleneck in a novel way. The final report will include detailed results and analysis to validate our hypothesis.
+## Probabilistic Sketching for KV-Cache Compression in LLMs – Final Report (GPT-2)
 
+## Problem
+Transformer inference commonly uses a key–value (KV) cache so each new token can attend over prior tokens without recomputing prior hidden states. The KV cache grows linearly with sequence length, increasing memory usage and attention cost.
 
-References
-Taming the Fragility of KV Cache Eviction in LLM Inference
-https://arxiv.org/html/2510.13334v1
-KV Cache Eviction in Transformer LLMs
-https://www.emergentmind.com/topics/kv-cache-eviction
+This project explores whether probabilistic sketches (specifically **Count-Min Sketch**) can support KV-cache **compression via eviction** while remaining compatible with Hugging Face `generate()`.
+
+## What we implemented
+- **Model**: GPT-2 small (`gpt2`, 117M) via Hugging Face Transformers.
+- **Sketch**: Count-Min Sketch (`src/sketches/count_min_sketch.py`).
+- **Compression**: eviction-based KV-cache cap by physically capping `past_key_values` to `max_cache_size` during generation.
+- **Integration**: Transformers can represent `past_key_values` as a `DynamicCache`. We cap the cache in `SketchGPT2LMHeadModel.forward()` by updating each layer’s `keys/values` so the next generation step uses the compressed cache (`src/models/sketch_gpt2.py`).
+
+## Method (eviction-only)
+For each transformer layer:
+1. Maintain a Count-Min Sketch per head; update it with each new token’s key vector.
+2. When KV length exceeds `max_cache_size`, compute an importance score per position (sketch query over stored keys), keep the top positions, and **return a capped KV cache**.
+
+This final implementation focuses on KV eviction. We do **not** claim a sketch-based attention approximation method (e.g., aggregate attention) in the final evaluation.
+
+## Experimental setup
+### Hardware
+- **GPU**: NVIDIA A100-SXM4-40GB (Lambda `gpu_1x_a100_sxm4`)
+
+### Dataset / prompts
+- WikiText-2 test split; prompts truncated to ~50 tokens
+
+### Total lengths
+- Results reported at **total lengths 256 and 512** (prompt length + generated tokens).
+
+### Baselines
+- **Full cache**: vanilla GPT-2 with standard KV cache (`experiments/baseline.py`)
+- **Sliding window** and **quantization**: included as comparisons (`experiments/baselines_comparison.py`), but note this script states these are simplified measurement proxies.
+
+### Targeted sketch grid (12 configs)
+- `sketch_width ∈ {256, 512}`
+- `sketch_depth ∈ {2, 4}`
+- `max_cache_size ∈ {64, 128, 256}`
+
+## Results
+### Full-cache baseline (GPT-2)
+From `results/baseline/baseline_summary.json`:
+- **Total length 256**
+  - Peak memory: **279.07 MB**
+  - Latency: **7.23 ms/token**
+  - Throughput: **139.45 tokens/sec**
+- **Total length 512**
+  - Peak memory: **288.07 MB**
+  - Latency: **7.03 ms/token**
+  - Throughput: **142.33 tokens/sec**
+- **Perplexity** (WikiText-2 subset): **49.10**
+
+### KV-cache compression works (cache size scales with `max_cache_size`)
+From `results/sketch/targeted_summary.json`:
+- **Total length 256**
+  - `max_cache_size=64`: cache **2.25 MB**
+  - `max_cache_size=128`: cache **4.50 MB**
+  - `max_cache_size=256`: cache **8.96 MB**
+- **Total length 512**
+  - `max_cache_size=64`: cache **2.25 MB**
+  - `max_cache_size=128`: cache **4.50 MB**
+  - `max_cache_size=256`: cache **9.00 MB**
+
+Figures:
+- `results/figures/sketch_cache_mb_vs_max_cache_size.png`
+- `results/figures/sketch_total_memory_vs_max_cache_size.png`
+
+### Performance trade-off (latency overhead)
+Throughput is lower than the full-cache baseline due to per-step eviction scoring (per layer, per generation step).
+
+Best sketch throughput configs observed:
+- **Total length 256**: **28.36 tokens/sec** (`width=512, depth=2, max_cache_size=256`)
+- **Total length 512**: **19.65 tokens/sec** (`width=256, depth=2, max_cache_size=256`)
+
+Figure:
+- `results/figures/throughput_baseline_vs_best_sketch.png`
+
+## Discussion
+### What worked
+- End-to-end **integration with `generate()`**: cache is populated and capped during generation.
+- Cache memory **scales with the compression knob** `max_cache_size`.
+
+### Limitations / caveats
+- This is **eviction**, not attention approximation (no aggregate/top-k attention approximation claims).
+- The current eviction scoring is expensive; throughput drops substantially vs full cache.
+- `sketch_memory_mb` includes bookkeeping used for analysis, not just the CM sketch table.
+- Sliding-window and quantization baselines here are simplified measurement proxies.
+
+## Reproduction (A100)
+### Install
+```bash
+python -m pip install -r requirements.txt
+```
+
+### Run tests
+```bash
+python test_implementation.py
+```
+
+### Baseline (full cache)
+```bash
+python experiments/baseline.py --device cuda --seq-lengths 256 512 --num-samples 10 --output-dir results/baseline
+```
+
+### Sketch targeted grid (eviction)
+```bash
+python experiments/sketch_experiments.py --device cuda --num-samples 10 --total-lengths 256 512 --grid targeted --output-dir results/sketch
+```
+
+### Baseline comparisons
+```bash
+python experiments/baselines_comparison.py --device cuda --num-samples 10 --total-lengths 256 512 --output-dir results/baselines
+```
+
+### Plots
+See `notebooks/final_plots.ipynb` and generated figures under `results/figures/`.
+
+## References
+- Taming the Fragility of KV Cache Eviction in LLM Inference: `https://arxiv.org/html/2510.13334v1`
+- KV Cache Eviction in Transformer LLMs: `https://www.emergentmind.com/topics/kv-cache-eviction`

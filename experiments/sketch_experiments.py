@@ -37,6 +37,7 @@ def run_sketch_generation(
     """
     # Encode prompt
     input_ids = tokenizer.encode(prompt, return_tensors='pt').to(device)
+    attention_mask = torch.ones_like(input_ids)
     
     # Reset trackers
     memory_tracker.reset()
@@ -52,6 +53,7 @@ def run_sketch_generation(
             max_new_tokens=max_new_tokens,
             do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
+            attention_mask=attention_mask,
             use_cache=True
         )
         
@@ -66,13 +68,40 @@ def run_sketch_generation(
     return generated_text
 
 
+def run_sketch_generation_to_total_length(
+    model,
+    tokenizer,
+    prompt: str,
+    total_length: int,
+    device: str,
+    memory_tracker: MemoryTracker,
+    latency_tracker: LatencyTracker,
+):
+    """
+    Generate until reaching a target total sequence length (prompt + new tokens).
+    """
+    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+    prompt_len = input_ids.shape[1]
+    max_new_tokens = max(0, int(total_length) - int(prompt_len))
+    return run_sketch_generation(
+        model=model,
+        tokenizer=tokenizer,
+        prompt=prompt,
+        max_new_tokens=max_new_tokens,
+        device=device,
+        memory_tracker=memory_tracker,
+        latency_tracker=latency_tracker,
+    )
+
+
 def evaluate_sketch_config(
     model_name: str,
     sketch_config: dict,
     device: str,
     test_texts: list,
     num_samples: int,
-    max_new_tokens: int,
+    max_new_tokens: int = 128,
+    total_length: int = None,
     reference_texts: list = None
 ):
     """
@@ -129,20 +158,37 @@ def evaluate_sketch_config(
         
         try:
             # Generate
-            generated_text = run_sketch_generation(
-                model=model,
-                tokenizer=tokenizer,
-                prompt=prompt,
-                max_new_tokens=max_new_tokens,
-                device=device,
-                memory_tracker=memory_tracker,
-                latency_tracker=latency_tracker
-            )
+            if total_length is not None:
+                generated_text = run_sketch_generation_to_total_length(
+                    model=model,
+                    tokenizer=tokenizer,
+                    prompt=prompt,
+                    total_length=total_length,
+                    device=device,
+                    memory_tracker=memory_tracker,
+                    latency_tracker=latency_tracker,
+                )
+                effective_new_tokens = max(
+                    0,
+                    int(total_length)
+                    - int(tokenizer.encode(prompt, return_tensors="pt").shape[1]),
+                )
+            else:
+                generated_text = run_sketch_generation(
+                    model=model,
+                    tokenizer=tokenizer,
+                    prompt=prompt,
+                    max_new_tokens=max_new_tokens,
+                    device=device,
+                    memory_tracker=memory_tracker,
+                    latency_tracker=latency_tracker,
+                )
+                effective_new_tokens = int(max_new_tokens)
             
             # Collect metrics
             peak_memory = memory_tracker.get_peak_memory()
             total_time = latency_tracker.total_time
-            tokens_per_sec = max_new_tokens / total_time if total_time > 0 else 0
+            tokens_per_sec = effective_new_tokens / total_time if total_time > 0 else 0
             
             results['memory_mb'].append(peak_memory)
             results['latency_s'].append(total_time)
@@ -180,7 +226,9 @@ def run_experiment_grid(
     device: str = 'cuda',
     output_dir: str = 'results/sketch',
     num_samples: int = 10,
-    max_new_tokens: int = 128
+    max_new_tokens: int = 128,
+    total_lengths: list = None,
+    grid: str = "full",
 ):
     """
     Run experiments across a grid of sketch configurations.
@@ -214,43 +262,78 @@ def run_experiment_grid(
         prompt = tokenizer.decode(tokens)
         test_prompts.append(prompt)
     
-    # Define experiment grid with COMPRESSION parameter!
-    sketch_widths = [128, 256, 512, 1024]
-    sketch_depths = [2, 4, 6]
-    strategies = ['topk', 'aggregate']
-    topk_values = [32, 64, 128]
-    max_cache_sizes = [64, 128, 256]  # NEW: Test different compression levels!
+    def build_configs(grid_name: str):
+        if grid_name == "targeted":
+            sketch_widths = [256, 512]
+            sketch_depths = [2, 4]
+            max_cache_sizes = [64, 128, 256]
+            configs = []
+            for width, depth, cache_size in itertools.product(
+                sketch_widths, sketch_depths, max_cache_sizes
+            ):
+                configs.append(
+                    {
+                        "sketch_width": width,
+                        "sketch_depth": depth,
+                        "strategy": "topk",  # ignored for eviction-only, kept for compatibility
+                        "topk": 64,
+                        "recent_window": 64,
+                        "max_cache_size": cache_size,
+                    }
+                )
+            return configs
+
+        # Default: original full grid
+        sketch_widths = [128, 256, 512, 1024]
+        sketch_depths = [2, 4, 6]
+        strategies = ["topk", "aggregate"]
+        topk_values = [32, 64, 128]
+        max_cache_sizes = [64, 128, 256]
+
+        configs = []
+        for width, depth, strategy, cache_size in itertools.product(
+            sketch_widths, sketch_depths, strategies, max_cache_sizes
+        ):
+            if strategy == "topk":
+                for topk in topk_values:
+                    configs.append(
+                        {
+                            "sketch_width": width,
+                            "sketch_depth": depth,
+                            "strategy": strategy,
+                            "topk": topk,
+                            "recent_window": 64,
+                            "max_cache_size": cache_size,
+                        }
+                    )
+            else:
+                configs.append(
+                    {
+                        "sketch_width": width,
+                        "sketch_depth": depth,
+                        "strategy": strategy,
+                        "topk": 64,
+                        "recent_window": 64,
+                        "max_cache_size": cache_size,
+                    }
+                )
+        return configs
     
-    # Generate all configurations
-    configs = []
-    for width, depth, strategy, cache_size in itertools.product(
-        sketch_widths, sketch_depths, strategies, max_cache_sizes
-    ):
-        if strategy == 'topk':
-            for topk in topk_values:
-                configs.append({
-                    'sketch_width': width,
-                    'sketch_depth': depth,
-                    'strategy': strategy,
-                    'topk': topk,
-                    'recent_window': 64,
-                    'max_cache_size': cache_size  # NEW: Enables compression!
-                })
-        else:
-            # Aggregate strategy doesn't need topk parameter
-            configs.append({
-                'sketch_width': width,
-                'sketch_depth': depth,
-                'strategy': strategy,
-                'topk': 64,  # Not used but required
-                'recent_window': 64,
-                'max_cache_size': cache_size  # NEW: Enables compression!
-            })
+    configs = build_configs(grid)
     
     print(f"\nTotal configurations to test: {len(configs)}")
     
     # Run experiments
     all_results = []
+    targeted_summary = {
+        "model_name": model_name,
+        "device": device,
+        "grid": grid,
+        "num_samples": num_samples,
+        "max_new_tokens": max_new_tokens,
+        "total_lengths": total_lengths,
+        "results": [],
+    }
     
     for config_idx, config in enumerate(configs):
         print(f"\n{'='*60}")
@@ -260,50 +343,129 @@ def run_experiment_grid(
             print(f"  {key}: {value}")
         
         try:
-            results = evaluate_sketch_config(
-                model_name=model_name,
-                sketch_config=config,
-                device=device,
-                test_texts=test_prompts,
-                num_samples=num_samples,
-                max_new_tokens=max_new_tokens
-            )
+            if total_lengths:
+                for total_len in total_lengths:
+                    results = evaluate_sketch_config(
+                        model_name=model_name,
+                        sketch_config=config,
+                        device=device,
+                        test_texts=test_prompts,
+                        num_samples=num_samples,
+                        max_new_tokens=max_new_tokens,
+                        total_length=int(total_len),
+                    )
+                    results["total_length"] = int(total_len)
+
+                    # Compute averages
+                    if results["memory_mb"]:
+                        avg_memory = sum(results["memory_mb"]) / len(results["memory_mb"])
+                        avg_latency = sum(results["latency_s"]) / len(results["latency_s"])
+                        avg_throughput = (
+                            sum(results["tokens_per_sec"]) / len(results["tokens_per_sec"])
+                        )
+
+                        print(f"\nResults (total_length={total_len}):")
+                        print(f"  Total GPU memory: {avg_memory:.2f} MB")
+                        print(
+                            f"  Cache memory: {results['cache_memory_mb']:.2f} MB (max_size={config['max_cache_size']})"
+                        )
+                        print(
+                            f"  Avg tokens stored/layer: {results['avg_tokens_per_layer']:.1f}"
+                        )
+                        print(f"  Sketch overhead: {results['sketch_memory_mb']:.2f} MB")
+                        print(f"  Avg latency: {avg_latency:.2f} s")
+                        print(f"  Avg throughput: {avg_throughput:.2f} tokens/s")
+
+                        all_results.append(
+                            {
+                                "total_length": int(total_len),
+                                "config": config,
+                                "avg_memory_mb": avg_memory,
+                                "sketch_memory_mb": results["sketch_memory_mb"],
+                                "cache_memory_mb": results["cache_memory_mb"],
+                                "avg_tokens_per_layer": results["avg_tokens_per_layer"],
+                                "avg_latency_s": avg_latency,
+                                "avg_throughput": avg_throughput,
+                            }
+                        )
+                        targeted_summary["results"].append(
+                            {
+                                "total_length": int(total_len),
+                                "config": config,
+                                "avg_memory_mb": avg_memory,
+                                "sketch_memory_mb": results["sketch_memory_mb"],
+                                "cache_memory_mb": results["cache_memory_mb"],
+                                "avg_tokens_per_layer": results["avg_tokens_per_layer"],
+                                "avg_latency_s": avg_latency,
+                                "avg_throughput": avg_throughput,
+                            }
+                        )
+
+                        # Save per-config-per-length results
+                        config_filename = (
+                            f"config_w{config['sketch_width']}_d{config['sketch_depth']}_{config['strategy']}"
+                        )
+                        if config["strategy"] == "topk":
+                            config_filename += f"_k{config['topk']}"
+                        config_filename += f"_len{int(total_len)}.json"
+
+                        with open(os.path.join(output_dir, config_filename), "w") as f:
+                            json.dump(results, f, indent=2)
+            else:
+                results = evaluate_sketch_config(
+                    model_name=model_name,
+                    sketch_config=config,
+                    device=device,
+                    test_texts=test_prompts,
+                    num_samples=num_samples,
+                    max_new_tokens=max_new_tokens,
+                )
             
-            # Compute averages
-            if results['memory_mb']:
-                avg_memory = sum(results['memory_mb']) / len(results['memory_mb'])
-                avg_latency = sum(results['latency_s']) / len(results['latency_s'])
-                avg_throughput = sum(results['tokens_per_sec']) / len(results['tokens_per_sec'])
-                
-                print(f"\nResults:")
-                print(f"  Total GPU memory: {avg_memory:.2f} MB")
-                print(f"  Cache memory: {results['cache_memory_mb']:.2f} MB (max_size={config['max_cache_size']})")
-                print(f"  Avg tokens stored/layer: {results['avg_tokens_per_layer']:.1f}")
-                print(f"  Sketch overhead: {results['sketch_memory_mb']:.2f} MB")
-                print(f"  Avg latency: {avg_latency:.2f} s")
-                print(f"  Avg throughput: {avg_throughput:.2f} tokens/s")
-                
-                if results['bleu_scores']:
-                    avg_bleu = sum(results['bleu_scores']) / len(results['bleu_scores'])
-                    print(f"  Avg BLEU: {avg_bleu:.4f}")
-                
-                all_results.append({
-                    'config': config,
-                    'avg_memory_mb': avg_memory,
-                    'sketch_memory_mb': results['sketch_memory_mb'],
-                    'avg_latency_s': avg_latency,
-                    'avg_throughput': avg_throughput,
-                    'full_results': results
-                })
-                
-                # Save individual config results
-                config_filename = f"config_w{config['sketch_width']}_d{config['sketch_depth']}_{config['strategy']}"
-                if config['strategy'] == 'topk':
-                    config_filename += f"_k{config['topk']}"
-                config_filename += '.json'
-                
-                with open(os.path.join(output_dir, config_filename), 'w') as f:
-                    json.dump(results, f, indent=2)
+                # Compute averages
+                if results["memory_mb"]:
+                    avg_memory = sum(results["memory_mb"]) / len(results["memory_mb"])
+                    avg_latency = sum(results["latency_s"]) / len(results["latency_s"])
+                    avg_throughput = sum(results["tokens_per_sec"]) / len(
+                        results["tokens_per_sec"]
+                    )
+
+                    print(f"\nResults:")
+                    print(f"  Total GPU memory: {avg_memory:.2f} MB")
+                    print(
+                        f"  Cache memory: {results['cache_memory_mb']:.2f} MB (max_size={config['max_cache_size']})"
+                    )
+                    print(
+                        f"  Avg tokens stored/layer: {results['avg_tokens_per_layer']:.1f}"
+                    )
+                    print(f"  Sketch overhead: {results['sketch_memory_mb']:.2f} MB")
+                    print(f"  Avg latency: {avg_latency:.2f} s")
+                    print(f"  Avg throughput: {avg_throughput:.2f} tokens/s")
+
+                    if results["bleu_scores"]:
+                        avg_bleu = sum(results["bleu_scores"]) / len(results["bleu_scores"])
+                        print(f"  Avg BLEU: {avg_bleu:.4f}")
+
+                    all_results.append(
+                        {
+                            "config": config,
+                            "avg_memory_mb": avg_memory,
+                            "sketch_memory_mb": results["sketch_memory_mb"],
+                            "avg_latency_s": avg_latency,
+                            "avg_throughput": avg_throughput,
+                            "full_results": results,
+                        }
+                    )
+
+                    # Save individual config results
+                    config_filename = (
+                        f"config_w{config['sketch_width']}_d{config['sketch_depth']}_{config['strategy']}"
+                    )
+                    if config["strategy"] == "topk":
+                        config_filename += f"_k{config['topk']}"
+                    config_filename += ".json"
+
+                    with open(os.path.join(output_dir, config_filename), "w") as f:
+                        json.dump(results, f, indent=2)
             
         except Exception as e:
             print(f"Error with config: {e}")
@@ -322,6 +484,11 @@ def run_experiment_grid(
     
     with open(os.path.join(output_dir, 'experiment_summary.json'), 'w') as f:
         json.dump(summary, f, indent=2)
+
+    # Save targeted summary if applicable
+    if grid == "targeted" or total_lengths:
+        with open(os.path.join(output_dir, "targeted_summary.json"), "w") as f:
+            json.dump(targeted_summary, f, indent=2)
     
     print(f"\nExperiments complete! Results saved to {output_dir}/")
     
@@ -359,6 +526,20 @@ def main():
                        help='Number of samples per config')
     parser.add_argument('--max-tokens', type=int, default=128,
                        help='Max tokens to generate')
+    parser.add_argument(
+        "--total-lengths",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Target total sequence lengths (prompt + generated). If provided, overrides --max-tokens per sample.",
+    )
+    parser.add_argument(
+        "--grid",
+        type=str,
+        choices=["full", "targeted"],
+        default="full",
+        help="Which configuration grid to run.",
+    )
     
     args = parser.parse_args()
     
@@ -367,7 +548,9 @@ def main():
         device=args.device,
         output_dir=args.output_dir,
         num_samples=args.num_samples,
-        max_new_tokens=args.max_tokens
+        max_new_tokens=args.max_tokens,
+        total_lengths=args.total_lengths,
+        grid=args.grid,
     )
 
 

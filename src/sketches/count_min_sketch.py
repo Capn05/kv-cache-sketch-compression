@@ -43,38 +43,51 @@ class CountMinSketch:
         # Use large prime for better distribution
         self.prime = 2**31 - 1
         
-        # Random hash parameters for each depth
+        # Random hash parameters for each depth (stored as torch tensors on device)
         np.random.seed(42)  # For reproducibility
-        self.hash_params = []
+        a_list = []
+        b_list = []
         for _ in range(depth):
-            a = np.random.randint(1, self.prime)
-            b = np.random.randint(0, self.prime)
-            self.hash_params.append((a, b))
+            a_list.append(np.random.randint(1, self.prime))
+            b_list.append(np.random.randint(0, self.prime))
+        self.hash_a = torch.tensor(a_list, device=device, dtype=torch.int64)  # (depth,)
+        self.hash_b = torch.tensor(b_list, device=device, dtype=torch.int64)  # (depth,)
         
         # Track which keys have been inserted (for top-k retrieval)
         self.key_history = []
         self.max_history = 10000  # Limit history size
         
-    def _hash(self, key: torch.Tensor, depth_idx: int) -> torch.Tensor:
+    def _key_to_int(self, key: torch.Tensor) -> torch.Tensor:
         """
-        Compute hash value for a key at a specific depth.
+        Convert a key vector to an int64 scalar for hashing (stays on device).
         
         Args:
             key: Input key tensor (can be multi-dimensional)
-            depth_idx: Which hash function to use (0 to depth-1)
             
         Returns:
-            Hash values in range [0, width-1]
+            int64 scalar tensor on the sketch device
         """
-        a, b = self.hash_params[depth_idx]
-        
-        # Convert key to single scalar value for hashing
-        # Use sum of all elements as the key representation
-        key_val = int(key.sum().abs().item())
-        
-        # Universal hashing
-        hash_val = ((a * key_val + b) % self.prime) % self.width
-        return hash_val
+        if key.device != self.sketch.device:
+            key = key.to(self.sketch.device)
+        # Use sum(abs(key)) as a deterministic scalar; keep it on GPU to avoid sync.
+        return torch.sum(torch.abs(key)).to(torch.int64)
+
+    def _hash_buckets(self, key_vals: torch.Tensor) -> torch.Tensor:
+        """
+        Compute bucket indices for a batch of key_vals.
+
+        Args:
+            key_vals: int64 tensor shape (n,)
+
+        Returns:
+            buckets: int64 tensor shape (depth, n) with values in [0, width-1]
+        """
+        if key_vals.device != self.sketch.device:
+            key_vals = key_vals.to(self.sketch.device)
+        key_vals = key_vals.to(torch.int64)
+        # (depth, 1) * (1, n) -> (depth, n)
+        hv = (self.hash_a.view(self.depth, 1) * key_vals.view(1, -1) + self.hash_b.view(self.depth, 1)) % self.prime
+        return hv % self.width
     
     def update(self, key: torch.Tensor, value: float = 1.0):
         """
@@ -85,21 +98,22 @@ class CountMinSketch:
             value: Value to add (default: 1.0 for frequency counting)
         """
         # Ensure key is on correct device
-        if key.device != self.device:
-            key = key.to(self.device)
-        
-        # Update all depth rows
+        if key.device != self.sketch.device:
+            key = key.to(self.sketch.device)
+
+        key_val = self._key_to_int(key).view(1)  # (1,)
+        buckets = self._hash_buckets(key_val)  # (depth, 1)
+        val = torch.tensor([value], device=self.sketch.device, dtype=self.dtype)
         for d in range(self.depth):
-            bucket = self._hash(key, d)
-            self.sketch[d, bucket] += value
+            self.sketch[d].index_add_(0, buckets[d], val)
         
         # Track key for top-k retrieval
         if len(self.key_history) < self.max_history:
             self.key_history.append(key.detach().cpu())
     
-    def query(self, key: torch.Tensor) -> float:
+    def query_tensor(self, key: torch.Tensor) -> torch.Tensor:
         """
-        Query estimated frequency/value for a key.
+        Query estimated frequency/value for a key (returns a scalar tensor on device).
         
         Uses the minimum estimate across all hash functions (CM sketch property).
         
@@ -109,17 +123,22 @@ class CountMinSketch:
         Returns:
             Estimated frequency/value
         """
-        # Ensure key is on correct device
-        if key.device != self.device:
-            key = key.to(self.device)
-        
-        # Get minimum estimate across all depths
-        estimates = []
-        for d in range(self.depth):
-            bucket = self._hash(key, d)
-            estimates.append(self.sketch[d, bucket].item())
-        
-        return min(estimates)
+        if key.device != self.sketch.device:
+            key = key.to(self.sketch.device)
+        key_val = self._key_to_int(key).view(1)  # (1,)
+        buckets = self._hash_buckets(key_val)  # (depth, 1)
+        # gather -> (depth, 1)
+        gathered = torch.stack(
+            [self.sketch[d].gather(0, buckets[d]) for d in range(self.depth)],
+            dim=0,
+        )
+        return torch.min(gathered).view(())
+
+    def query(self, key: torch.Tensor) -> float:
+        """
+        Query estimated frequency/value for a key (returns python float).
+        """
+        return float(self.query_tensor(key).item())
     
     def batch_query(self, keys: torch.Tensor) -> torch.Tensor:
         """
@@ -131,13 +150,27 @@ class CountMinSketch:
         Returns:
             Estimated values, shape (batch_size,)
         """
-        batch_size = keys.shape[0]
-        estimates = torch.zeros(batch_size, device=self.device, dtype=self.dtype)
-        
-        for i in range(batch_size):
-            estimates[i] = self.query(keys[i])
-        
-        return estimates
+        return self.batch_query_tensor(keys)
+
+    def batch_query_tensor(self, keys: torch.Tensor) -> torch.Tensor:
+        """
+        Query multiple keys in batch (returns tensor on device).
+
+        Args:
+            keys: shape (n, key_dim)
+        Returns:
+            estimates: shape (n,) on sketch device
+        """
+        if keys.device != self.sketch.device:
+            keys = keys.to(self.sketch.device)
+        # Convert each key to int64 scalar (n,)
+        key_vals = torch.sum(torch.abs(keys), dim=1).to(torch.int64)
+        buckets = self._hash_buckets(key_vals)  # (depth, n)
+        gathered = []
+        for d in range(self.depth):
+            gathered.append(self.sketch[d].gather(0, buckets[d]))
+        stacked = torch.stack(gathered, dim=0)  # (depth, n)
+        return torch.min(stacked, dim=0).values.to(self.dtype)
     
     def get_topk(self, k: int) -> List[Tuple[torch.Tensor, float]]:
         """
