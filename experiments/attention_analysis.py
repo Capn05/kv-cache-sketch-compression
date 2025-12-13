@@ -20,6 +20,62 @@ from tqdm import tqdm
 from src.models.sketch_gpt2 import SketchGPT2LMHeadModel
 from src.evaluation.metrics import QualityMetrics
 
+def plot_attention_kl_cosine(summary_path: str, output_path: str) -> None:
+    """
+    Create the dual-axis bar plot used in the writeup.
+
+    Places the legend outside the plot area (right side) so it never overlaps bars.
+    """
+    import matplotlib.pyplot as plt
+
+    with open(summary_path, "r") as f:
+        summary = json.load(f)
+
+    results = summary.get("results", [])
+    if not results:
+        raise ValueError(f"No results found in summary: {summary_path}")
+
+    labels = [r["config"]["sketch_type"] for r in results]
+    kl = [float(r["avg_kl_divergence"]) for r in results]
+    cos = [float(r["avg_cosine_similarity"]) for r in results]
+
+    cfg0 = results[0].get("config", {})
+    layer_idx = cfg0.get("layer_idx", 6)
+    max_length = cfg0.get("max_length", 256)
+
+    x = np.arange(len(labels))
+    width = 0.40
+
+    fig, ax1 = plt.subplots(figsize=(8, 4))
+    ax2 = ax1.twinx()
+
+    b1 = ax1.bar(x - width / 2, kl, width, label="KL divergence (↓)", color="#1f77b4")
+    b2 = ax2.bar(x + width / 2, cos, width, label="Cosine similarity (↑)", color="#ff7f0e")
+
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(labels)
+    ax1.set_ylabel("Avg KL divergence (lower is better)")
+    ax2.set_ylabel("Avg cosine similarity (higher is better)")
+    ax1.set_title(f"Attention distribution mismatch (layer {layer_idx}, max_length={max_length})")
+
+    # Legend outside plot (right side), so it never covers bars.
+    handles = [b1, b2]
+    legend_labels = [h.get_label() for h in handles]
+    ax1.legend(
+        handles,
+        legend_labels,
+        loc="center left",
+        bbox_to_anchor=(1.34, 0.5),
+        borderaxespad=0.0,
+        frameon=True,
+    )
+
+    # Reserve space for the outside legend.
+    fig.subplots_adjust(right=0.58)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
 
 def compare_attention_distributions(
     full_attention: torch.Tensor,
@@ -372,6 +428,18 @@ def run_attention_analysis(
             ]
         }
         json.dump(json_summary, f, indent=2)
+
+    # Also write the figure used in the report.
+    try:
+        fig_out = os.path.join("results", "figures", "attention_analysis_kl_cosine.png")
+        os.makedirs(os.path.dirname(fig_out), exist_ok=True)
+        plot_attention_kl_cosine(
+            summary_path=os.path.join(output_dir, "analysis_summary.json"),
+            output_path=fig_out,
+        )
+        print(f"Wrote figure: {fig_out}")
+    except Exception as e:
+        print(f"Warning: failed to write attention plot: {e}")
     
     print(f"\nAnalysis complete! Results saved to {output_dir}/")
     
@@ -388,9 +456,18 @@ def main():
     parser.add_argument('--num-samples', type=int, default=10, help='Number of samples')
     parser.add_argument('--output-dir', type=str, default='results/attention_analysis',
                        help='Output directory')
+    parser.add_argument('--plot-summary', type=str, default=None,
+                       help='If set, skip analysis and only plot this summary JSON')
+    parser.add_argument('--plot-out', type=str, default='results/figures/attention_analysis_kl_cosine.png',
+                       help='Output path for attention KL/cosine figure')
     
     args = parser.parse_args()
-    
+
+    if args.plot_summary:
+        plot_attention_kl_cosine(args.plot_summary, args.plot_out)
+        print(f"Wrote figure: {args.plot_out}")
+        return
+
     run_attention_analysis(
         model_name=args.model,
         device=args.device,
