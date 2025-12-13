@@ -460,13 +460,16 @@ def run_experiment_grid(
             for sketch_type, width, depth, cache_size in itertools.product(
                 sketch_types, sketch_widths, sketch_depths, max_cache_sizes
             ):
+                recent_window = 64
+                # For the top-k strategy, pick topk so (recent_window + topk) ~= max_cache_size.
+                topk = max(0, int(cache_size) - int(recent_window))
                 cfg = {
                     "sketch_type": sketch_type,
                     "sketch_width": width,
                     "sketch_depth": depth,
                     "strategy": "topk",  # accepted for compatibility
-                    "topk": 64,
-                    "recent_window": 64,
+                    "topk": topk,
+                    "recent_window": recent_window,
                     "max_cache_size": cache_size,
                 }
                 if sketch_type == "race":

@@ -1,0 +1,33 @@
+{
+  "config": {
+    "sketch_type": "race",
+    "sketch_width": 512,
+    "sketch_depth": 4,
+    "strategy": "topk",
+    "topk": 64,
+    "recent_window": 64,
+    "max_cache_size": 256,
+    "race_bins": 512,
+    "race_num_projections": 16,
+    "race_seed": 42
+  },
+  "memory_mb": [
+    295.5947265625
+  ],
+  "latency_s": [
+    117.25154399871826
+  ],
+  "tokens_per_sec": [
+    8.3069268581286
+  ],
+  "generated_texts": [
+    " Robert Boulter is an English film , television and theatre actor . He had a guest @-@ starring role on the television series The Bill in 2000 . This was followed by a starring role in the play Herons"
+  ],
+  "bleu_scores": [],
+  "adaptive_log": [],
+  "sketch_memory_mb": 5.0625,
+  "cache_memory_mb": 9.0,
+  "total_sketch_cache_mb": 14.0625,
+  "avg_tokens_per_layer": 256.0,
+  "total_length": 1024
+}

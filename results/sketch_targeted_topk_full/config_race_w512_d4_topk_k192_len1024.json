@@ -1,0 +1,69 @@
+{
+  "config": {
+    "sketch_type": "race",
+    "sketch_width": 512,
+    "sketch_depth": 4,
+    "strategy": "topk",
+    "topk": 192,
+    "recent_window": 64,
+    "max_cache_size": 256,
+    "race_bins": 512,
+    "race_num_projections": 16,
+    "race_seed": 42
+  },
+  "memory_mb": [
+    295.59619140625,
+    295.59619140625,
+    295.59619140625,
+    295.59619140625,
+    295.59619140625,
+    295.59619140625,
+    295.59619140625,
+    295.59619140625,
+    295.59619140625,
+    295.59619140625
+  ],
+  "latency_s": [
+    121.92631483078003,
+    120.36107921600342,
+    119.34349298477173,
+    118.98495435714722,
+    119.5888204574585,
+    123.51336550712585,
+    122.27670955657959,
+    119.52970170974731,
+    120.21258282661438,
+    122.00339245796204
+  ],
+  "tokens_per_sec": [
+    7.988431384576842,
+    8.092316937870189,
+    8.161316345284805,
+    8.18590892657256,
+    8.14457401849266,
+    7.88578625479853,
+    7.965539827920484,
+    8.148602281005886,
+    8.102313227932425,
+    7.983384563143236
+  ],
+  "generated_texts": [
+    " Robert Boulter is an English film , television and theatre actor . He had a guest @-@ starring role on the television series The Bill in 2000 . This was followed by a starring role in the play Herons",
+    " In 2006 , Boulter starred alongside Whishaw in the play Citizenship written by Mark Ravenhill . He appeared on a 2006 episode of the television series , Doctors , followed by a role in the 2007 theat",
+    " In 2000 Boulter had a guest @-@ starring role on the television series The Bill ; he portrayed \" Scott Parry \" in the episode , \" In Safe Hands \" . Boulter starred as \" Scott \" in the play Herons in ",
+    " He had a recurring role in 2003 on two episodes of The Bill , as character \" Connor Price \" . In 2004 Boulter landed a role as \" Craig \" in the episode \" Teddy 's Story \" of the television series The",
+    " In 2006 Boulter starred in the play Citizenship written by Mark Ravenhill . The play was part of a series which featured different playwrights , titled Burn / Chatroom / Citizenship . In a 2006 inter",
+    " Boulter starred in two films in 2008 , Daylight Robbery by filmmaker Paris Leonti , and Donkey Punch directed by Olly Blackburn . Boulter portrayed a character named \" Sean \" in Donkey Punch , who ta",
+    " Du Fu ( Wade \u2013 Giles : Tu Fu ; Chinese : \u675c\u752b ; 712 \u2013 770 ) was a prominent Chinese poet of the Tang dynasty . Along with Li Bai ( Li Po ) , he is frequently called the greatest of the Chinese poets. H",
+    " Although initially he was little @-@ known to other writers , his works came to be hugely influential in both Chinese and Japanese literary culture . Of his poetic writing , nearly fifteen hundred po",
+    " Traditional Chinese literary criticism emphasized the life of the author when interpreting a work , a practice which Burton Watson attributes to \" the close links that traditional Chinese thought pos",
+    " Most of what is known of Du Fu 's life comes from his poems . His paternal grandfather was Du Shenyan , a noted politician and poet during the reign of Empress Wu . Du Fu was born in 712 ; the exact "
+  ],
+  "bleu_scores": [],
+  "adaptive_log": [],
+  "sketch_memory_mb": 5.0625,
+  "cache_memory_mb": 9.0,
+  "total_sketch_cache_mb": 14.0625,
+  "avg_tokens_per_layer": 256.0,
+  "total_length": 1024
+}

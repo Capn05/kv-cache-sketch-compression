@@ -36,9 +36,6 @@ ENV/
 # VS Code
 .vscode/
 
-# Results and data (DON'T upload large result files)
-results/
-*.json
 !requirements.txt
 
 # Model cache (large files)

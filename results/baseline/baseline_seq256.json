@@ -1,0 +1,51 @@
+{
+  "sequence_length": 256,
+  "memory_mb": [
+    279.06787109375,
+    279.06787109375,
+    279.06787109375,
+    279.06787109375,
+    279.06787109375,
+    279.06787109375,
+    279.06787109375,
+    279.06787109375,
+    279.06787109375,
+    279.06787109375
+  ],
+  "latency_ms": [
+    6.889610614591431,
+    6.810210283520153,
+    6.781846574209269,
+    6.801469812115419,
+    6.778646441339289,
+    6.823613805678285,
+    6.876342504927256,
+    6.79133933724709,
+    6.78044846914347,
+    6.780350092545296
+  ],
+  "tokens_per_sec": [
+    145.14608385590194,
+    146.83834395244352,
+    147.45246579344732,
+    147.0270438043709,
+    147.52207666438275,
+    146.54991159784686,
+    145.4261475898631,
+    147.2463604513916,
+    147.48286998283515,
+    147.48500982264278
+  ],
+  "generated_texts": [
+    " Robert Boulter is an English film , television and theatre actor . He had a guest @-@ starring role on the television series The Bill in 2000 . This was followed by a starring role in the play Herons",
+    " In 2006 , Boulter starred alongside Whishaw in the play Citizenship written by Mark Ravenhill . He appeared on a 2006 episode of the television series , Doctors , followed by a role in the 2007 theat",
+    " In 2000 Boulter had a guest @-@ starring role on the television series The Bill ; he portrayed \" Scott Parry \" in the episode , \" In Safe Hands \" . Boulter starred as \" Scott \" in the play Herons in ",
+    " He had a recurring role in 2003 on two episodes of The Bill , as character \" Connor Price \" . In 2004 Boulter landed a role as \" Craig \" in the episode \" Teddy 's Story \" of the television series The",
+    " In 2006 Boulter starred in the play Citizenship written by Mark Ravenhill . The play was part of a series which featured different playwrights , titled Burn / Chatroom / Citizenship . In a 2006 inter",
+    " Boulter starred in two films in 2008 , Daylight Robbery by filmmaker Paris Leonti , and Donkey Punch directed by Olly Blackburn . Boulter portrayed a character named \" Sean \" in Donkey Punch , who ta",
+    " Du Fu ( Wade \u2013 Giles : Tu Fu ; Chinese : \u675c\u752b ; 712 \u2013 770 ) was a prominent Chinese poet of the Tang dynasty . Along with Li Bai ( Li Po ) , he is frequently called the greatest of the Chinese poets. H",
+    " Although initially he was little @-@ known to other writers , his works came to be hugely influential in both Chinese and Japanese literary culture . Of his poetic writing , nearly fifteen hundred po",
+    " Traditional Chinese literary criticism emphasized the life of the author when interpreting a work , a practice which Burton Watson attributes to \" the close links that traditional Chinese thought pos",
+    " Most of what is known of Du Fu 's life comes from his poems . His paternal grandfather was Du Shenyan , a noted politician and poet during the reign of Empress Wu . Du Fu was born in 712 ; the exact "
+  ]
+}

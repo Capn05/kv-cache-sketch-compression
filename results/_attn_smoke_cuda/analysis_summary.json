@@ -1,0 +1,70 @@
+{
+  "model_name": "gpt2",
+  "num_samples": 1,
+  "num_configs": 3,
+  "results": [
+    {
+      "config": {
+        "sketch_type": "cms",
+        "sketch_width": 512,
+        "sketch_depth": 4,
+        "strategy": "topk",
+        "topk": 64,
+        "recent_window": 64,
+        "max_cache_size": 64,
+        "layer_idx": 6,
+        "warmup_tokens": 64,
+        "stride": 16,
+        "max_length": 256
+      },
+      "avg_kl_divergence": 12.224868670105934,
+      "avg_cosine_similarity": 0.14090765396423288,
+      "avg_l1_distance": 0.013781395042315125,
+      "avg_l2_distance": 0.05904356291284785,
+      "avg_peak_diff": 53.375
+    },
+    {
+      "config": {
+        "sketch_type": "count_sketch",
+        "sketch_width": 512,
+        "sketch_depth": 4,
+        "strategy": "topk",
+        "topk": 64,
+        "recent_window": 64,
+        "max_cache_size": 64,
+        "layer_idx": 6,
+        "warmup_tokens": 64,
+        "stride": 16,
+        "max_length": 256
+      },
+      "avg_kl_divergence": 12.224868670105934,
+      "avg_cosine_similarity": 0.14090765396423288,
+      "avg_l1_distance": 0.013781395042315125,
+      "avg_l2_distance": 0.05904356291284785,
+      "avg_peak_diff": 53.375
+    },
+    {
+      "config": {
+        "sketch_type": "race",
+        "race_bins": 512,
+        "race_num_projections": 16,
+        "race_seed": 42,
+        "sketch_width": 512,
+        "sketch_depth": 4,
+        "strategy": "topk",
+        "topk": 64,
+        "recent_window": 64,
+        "max_cache_size": 64,
+        "layer_idx": 6,
+        "warmup_tokens": 64,
+        "stride": 16,
+        "max_length": 256
+      },
+      "avg_kl_divergence": 13.19419912993908,
+      "avg_cosine_similarity": 0.1379255426202386,
+      "avg_l1_distance": 0.013795561215374619,
+      "avg_l2_distance": 0.05834327865159139,
+      "avg_peak_diff": 51.6875
+    }
+  ]
+}
