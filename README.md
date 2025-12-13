@@ -1,68 +1,56 @@
-# Probabilistic Sketching for KV-Cache Compression in LLMs
+## Probabilistic Sketching for KV-Cache Compression in LLMs
 
-This project implements Count-Min Sketch-based compression of the Key-Value cache in transformer language models to reduce memory footprint and improve inference latency while maintaining generation quality.
+This repo contains a runnable prototype that **bounds the GPT-2 KV cache** during decoding, using simple **sketch-driven retention** to decide which cached tokens to keep under a fixed cap.
 
-## Setup
+The final report is in `final_report.md` (and `final_report.pdf`).
 
-### Prerequisites
-- Python 3.8+
-- CUDA-capable GPU (8GB+ VRAM recommended)
-- 16GB+ system RAM
+### Quickstart (recommended)
 
-### Installation
-
-1. Create a virtual environment:
 ```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+make install
+make test
+make plot-main
 ```
 
-2. Install dependencies:
+- `make test` runs `test_implementation.py` (includes a small generation run).
+- `make plot-main` regenerates the **main plot** referenced by `final_report.md`:
+  - output: `results/figures/sketch_cache_mb_vs_max_cache_size.png`
+  - input (default): `results/sketch/targeted_summary.json`
+
+### Run experiments
+
 ```bash
-pip install -r requirements.txt
+# quick mode (few samples)
+make experiments-quick DEVICE=cuda
+
+# CPU fallback
+make experiments-quick DEVICE=cpu
+
+# full suite (slower)
+make experiments-full DEVICE=cuda
 ```
 
-3. Download models and datasets (automatic on first run):
+### Regenerate the main report plot directly
+
 ```bash
-python experiments/baseline.py
+python scripts/generate_main_plot.py \
+  --input results/sketch/targeted_summary.json \
+  --output results/figures/sketch_cache_mb_vs_max_cache_size.png
 ```
 
-## Project Structure
+### Repo layout
 
 ```
 .
+├── experiments/                  # runnable experiment scripts
+├── scripts/                      # plot-generation scripts
 ├── src/
-│   ├── sketches/          # Probabilistic sketch implementations
-│   ├── models/            # Modified GPT-2 with sketch integration
-│   └── evaluation/        # Metrics and benchmarking tools
-├── experiments/           # Experiment scripts
-├── notebooks/            # Analysis and visualization notebooks
-├── requirements.txt      # Python dependencies
-└── PROJECT.md           # Project proposal and report
+│   ├── models/                   # SketchGPT2LMHeadModel (bounded KV cache)
+│   ├── sketches/                 # Count-Min Sketch, Count-Sketch, RACE
+│   └── evaluation/               # memory/latency/quality utilities
+├── results/                      # JSON summaries + figures used in report
+├── run_all_experiments.py        # orchestrates the full pipeline
+├── test_implementation.py        # quick sanity checks
+├── Makefile
+└── requirements.txt
 ```
-
-## Usage
-
-### Run Baseline Experiments
-```bash
-python experiments/baseline.py
-```
-
-### Run Sketch Compression Experiments
-```bash
-python experiments/sketch_experiments.py
-```
-
-### Analyze Results
-```bash
-jupyter notebook notebooks/analysis.ipynb
-```
-
-## Results
-
-See `PROJECT.md` for detailed experimental results and analysis.
-
-## Authors
-
-Jay Fu and Gabriel Alvarado
-
