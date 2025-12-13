@@ -72,13 +72,46 @@ def main() -> None:
 
     sns.set_theme(style="whitegrid")
     plt.figure(figsize=(7, 4))
-    sns.lineplot(
-        data=df,
-        x="max_cache_size",
-        y="cache_memory_mb",
-        hue="total_length",
-        marker="o",
-    )
+    # Plot series manually so overlaps are visually obvious:
+    # - different linestyles
+    # - one series uses hollow markers (lets the other show through)
+    df = df.sort_values(["total_length", "max_cache_size"])
+    lengths = sorted(df["total_length"].unique().tolist())
+    palette = sns.color_palette(n_colors=len(lengths))
+    linestyles = ["-", "--", ":", "-."]
+    for i, total_length in enumerate(lengths):
+        g = df[df["total_length"] == total_length]
+        color = palette[i]
+        linestyle = linestyles[i % len(linestyles)]
+
+        # First series: filled markers; subsequent: hollow markers.
+        if i == 0:
+            mfc = color
+            mec = "white"
+            mew = 0.9
+            zorder = 2
+        else:
+            mfc = "none"
+            mec = color
+            mew = 2.0
+            zorder = 3 + i
+
+        plt.plot(
+            g["max_cache_size"],
+            g["cache_memory_mb"],
+            label=str(total_length),
+            color=color,
+            linestyle=linestyle,
+            linewidth=2.5,
+            alpha=0.95,
+            marker="o",
+            markersize=6,
+            markerfacecolor=mfc,
+            markeredgecolor=mec,
+            markeredgewidth=mew,
+            zorder=zorder,
+        )
+    plt.legend(title="total_length")
     plt.title("Sketch eviction: cache MB vs max_cache_size")
     plt.ylabel("cache MB (all layers)")
     plt.xlabel("max_cache_size (tokens)")
